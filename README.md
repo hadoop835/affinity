@@ -240,7 +240,8 @@ TODO ..
 
 # Development 
 
-The codebase is split into several modules:
+The codebase is split into several modules, some of which can and should be used independently
+of the akka core:
 
  - `api` is the internal programming api and utiliities for writing memstore and storage plugins (Java)
  - `avro` scala case class <--> avro automatic conversion with schema registry wrappers (conf,zk,local,embedded) (Scala)
@@ -255,24 +256,30 @@ The codebase is split into several modules:
  - `spark` uses the underlying stream storage as CompactRDD with all the serde magic
  - `ws-client` custom web socket with avro support (Java)
 
-## Testing the code
+### Cross-builds
 
-    ./gradlew test    
-    
-## Building the project
-        
-    ./gradlew build
+Currently the Akka, Akka Http and Akka Streams are held constant while other components can be
+cross-built: different Kafka, Spark and Scala versions can be created. At the moment only
+Scala 2.11 is there but once all the Akka and Akka Http modules are available in 2.12 they will appear here.
 
-### Cross-compiling
+Maintained crossbuilds appear as `master-<variant>` branches and are always up to date with the current `master`.
+On a clean working directory you can use `zzz` script which runs various gradle commands across
+all master branches.
 
-Current versions:
-    Scala 2.11.8
-    Kafka 0.11.0.2
-    Confluent 3.3.1
-    Spark 2.0.2
+    ./zzz test
 
-Using gradle root project properties scalaVersion, kafkaVersion and sparkVersion the projecct can
-be cross-compiled. Below is the list of branches that are m
+    ./zzz install
+
+#### Current master versions
+
+    Scala **2.11.8**
+    Kafka **1.0.0**
+    Confluent **4.0.0**
+    Spark **2.0.2**
+
+The `zzz` script uses git and gradle to switch between the maintained master branches
+but the   root project properties scalaVersion, kafkaVersion and sparkVersion the projecct can
+be used to create a custom enivironment.
 
 #### Scala 2.11
     - core-scala_2.11
