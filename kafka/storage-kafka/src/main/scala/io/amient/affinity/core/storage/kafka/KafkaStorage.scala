@@ -78,6 +78,8 @@ class KafkaStorage(id: String, stateConf: StateConf, partition: Int, numPartitio
   private val conf = KafkaStorage.StateConf(stateConf).Storage
   final val readonly: Boolean = stateConf.External()
   final val topic = conf.Topic()
+  val keySubject: String = s"${topic}-key"
+  val valueSubject: String = s"${topic}-value"
   final val ttlMs = stateConf.TtlSeconds() * 1000L
   final val minTimestamp: Long = math.max(stateConf.MinTimestampUnixMs(),
     if (ttlMs < 0) 0L else EventTime.unix() - ttlMs)
