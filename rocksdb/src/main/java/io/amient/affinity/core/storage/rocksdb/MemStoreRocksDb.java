@@ -49,18 +49,41 @@ public class MemStoreRocksDb extends MemStore {
     private static Map<Path, Long> refs = new HashMap<>();
     private static Map<Path, RocksDB> instances = new HashMap<>();
 
-    synchronized private static final RocksDB createOrGetDbInstanceRef(Path pathToData, Options rocksOptions, int ttlSecs) {
+    synchronized private static final RocksDB createOrGetDbInstanceRef(Path pathToData, StateConf conf) {
         RocksDB.loadLibrary();
         if (refs.containsKey(pathToData) && refs.get(pathToData) > 0) {
             refs.put(pathToData, refs.get(pathToData) + 1);
             return instances.get(pathToData);
         } else {
+            int ttlSecs = conf.TtlSeconds.apply();
+            MemStoreRocksDbConf rocksDbConf = new MemStoreRocksDbConf().apply(conf.MemStore);
+            final DBOptions rocksOptions = new DBOptions()
+                    .setCreateIfMissing(true)
+                    .setCreateMissingColumnFamilies(true);
+
+            final ColumnFamilyOptions cfOpts = new ColumnFamilyOptions()
+                    .optimizeUniversalStyleCompaction();
+
+            if(ttlSecs > 0) {
+                //TODO #148 this is where compaction filter code will be once the RocksDb Java API supports it
+                //cfOpts.setCompactionFilter(???);
+            }
+            if (conf.MemStore.KeyPrefixSize.isDefined()) {
+                //rocksOptions.useCappedPrefixExtractor(conf.MemStore.KeyPrefixSize.apply());
+                cfOpts.useCappedPrefixExtractor(conf.MemStore.KeyPrefixSize.apply());
+            }
+
+            // list of column family descriptors, first entry must always be default column family
+            final List<ColumnFamilyDescriptor> cfDescriptors = Arrays.asList(
+                new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, cfOpts)
+            );
+
+            //handles are not used as we only define default column faily
+            final List<ColumnFamilyHandle> columnFamilyHandleList = new ArrayList<>();
 
             try {
                 log.info("Opening RocksDb with TTL=" + ttlSecs);
-                RocksDB instance = ttlSecs > 0 ? TtlDB.open(rocksOptions, pathToData.toString(), ttlSecs, false)
-                        : TtlDB.open(rocksOptions, pathToData.toString());
-                //RocksDB instance = RocksDB.open(rocksOptions, pathToData.toString());
+                RocksDB instance = RocksDB.open(rocksOptions, pathToData.toString(), cfDescriptors, columnFamilyHandleList);
                 instances.put(pathToData, instance);
                 refs.put(pathToData, 1L);
                 return instance;
@@ -75,7 +98,12 @@ public class MemStoreRocksDb extends MemStore {
             refs.put(pathToData, refs.get(pathToData) - 1);
         } else {
             refs.remove(pathToData);
-            instances.get(pathToData).close();
+            RocksDB instance = instances.get(pathToData);
+            try {
+                instance.getDefaultColumnFamily().close();
+            } finally {
+                instance.close();
+            }
         }
     }
 
@@ -92,12 +120,7 @@ public class MemStoreRocksDb extends MemStore {
         pathToData = dataDir.resolve(this.getClass().getSimpleName());
         log.info("Opening RocksDb MemStore: " + pathToData);
         Files.createDirectories(pathToData);
-        MemStoreRocksDbConf rocksDbConf = new MemStoreRocksDbConf().apply(conf.MemStore);
-        Options rocksOptions = new Options().setCreateIfMissing(true);
-        if (conf.MemStore.KeyPrefixSize.isDefined()) {
-            rocksOptions.useCappedPrefixExtractor(conf.MemStore.KeyPrefixSize.apply());
-        }
-        internal = createOrGetDbInstanceRef(pathToData, rocksOptions, ttlSecs);
+        internal = createOrGetDbInstanceRef(pathToData, conf);
     }
 
     @Override
