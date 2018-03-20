@@ -19,12 +19,12 @@
 
 package io.amient.affinity.core.cluster
 
-import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 import akka.http.scaladsl.model.HttpMethods._
-import akka.http.scaladsl.model.StatusCodes._
-import akka.http.scaladsl.model.{HttpResponse, Uri, headers}
+import akka.http.scaladsl.model.{HttpResponse, StatusCode, Uri, headers}
+import akka.http.scaladsl.model.StatusCodes.{OK, SeeOther}
 import akka.util.Timeout
 import com.typesafe.config.ConfigValueFactory
 import io.amient.affinity.Conf
@@ -42,7 +42,7 @@ import scala.collection.JavaConverters._
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
 import scala.language.postfixOps
-import scala.util.Random
+import scala.util.{Failure, Random, Success, Try}
 
 
 class Failover2Spec extends FlatSpec with AffinityTestBase with EmbeddedKafka with Matchers {
@@ -64,18 +64,19 @@ class Failover2Spec extends FlatSpec with AffinityTestBase with EmbeddedKafka wi
     val keyspace1 = keyspace("keyspace1")
 
     override def handle: Receive = {
-      case HTTP(GET, PATH(key), _, response) => {
+      case HTTP(GET, PATH(key), _, response) => handleWith(response) {
         implicit val timeout = Timeout(specTimeout / 5)
-        delegateAndHandleErrors(response, keyspace1 ack GetValue(key)) {
+        keyspace1 ack GetValue(key) map {
           case valueOption => Encoder.json(OK, valueOption, gzip = false)
         }
       }
 
-      case HTTP(POST, PATH(key, value), _, response) =>
-        implicit val timeout = Timeout(1 second)
-        delegateAndHandleErrors(response, keyspace1 ack PutValue(key, value)) {
-          case result => HttpResponse(SeeOther, headers = List(headers.Location(Uri(s"/$key"))))
+      case HTTP(POST, PATH(key, value), _, response) => handleWith(response) {
+        implicit val timeout = Timeout(specTimeout / 5)
+        keyspace1 ack PutValue(key, value) map {
+          _ => HttpResponse(SeeOther, headers = List(headers.Location(Uri(s"/$key"))))
         }
+      }
     }
   })
 
@@ -99,56 +100,34 @@ class Failover2Spec extends FlatSpec with AffinityTestBase with EmbeddedKafka wi
 
   "Master Transition" should "not lead to inconsistent state" in {
     val requestCount = new AtomicLong(0L)
-    val errorCount = new AtomicLong(0L)
     val expected = new ConcurrentHashMap[String, String]()
     import scala.concurrent.ExecutionContext.Implicits.global
 
-    val client = new Thread {
-
-      override def run: Unit = {
-        val random = new Random()
-        val requests = scala.collection.mutable.ListBuffer[Future[String]]()
-        for (i <- (1 to 250)) {
-          if (isInterrupted) throw new InterruptedException
-          val key = random.nextInt.toString
-          val value = random.nextInt.toString
-          requests += node1.http(POST, s"/$key/$value") map {
-            case response =>
-              if (i == 100) {
-                //after a few writes have succeeded kill one node
-                node2.shutdown()
-              }
-              expected.put(key, value)
-              response.status.value
-          } recover {
-            case e: Throwable => e.getMessage
+    val random = new Random()
+    val requests = scala.collection.mutable.ListBuffer[Future[Try[StatusCode]]]()
+    for (i <- (1 to 250)) {
+      val key = random.nextInt.toString
+      val value = random.nextInt.toString
+      requests += node1.http(POST, s"/$key/$value") map {
+        case response =>
+          if (i == 100) {
+            //after a few writes have succeeded kill one node
+            node2.shutdown()
           }
-        }
-        requestCount.set(requests.size)
-        try {
-          val statuses = Await.result(Future.sequence(requests), specTimeout).groupBy(x => x).map {
-            case (status, list) => (status, list.length)
-          }
-          errorCount.set(requestCount.get - statuses("303 See Other"))
-        } catch {
-          case e: Throwable =>
-            e.printStackTrace()
-            errorCount.set(requests.size)
-        }
-
+          expected.put(key, value)
+          Success(response.status)
+      } recover {
+        case e: Throwable => Failure(e)
       }
     }
-    client.start
-    client.join(specTimeout.toMillis)
-    errorCount.get should be(0L)
-    val x = Await.result(Future.sequence(expected.asScala.map { case (key, value) =>
-      node1.http(GET, s"/$key").map {
-        response =>
-          (response.entity, jsonStringEntity(value))
-      }
-    }), specTimeout)
-    x.count { case (entity, expected) => entity != expected } should be(0)
+    requestCount.set(requests.size)
+    Await.result(Future.sequence(requests), specTimeout).foreach(_ should be(Success(SeeOther)))
 
+    expected.asScala.foreach { case (key, value) =>
+      val y = Await.result(node1.http(GET, s"/$key").map { response => response.entity }, specTimeout / 3)
+      val x = jsonStringEntity(value)
+      y should be(x)
+    }
   }
 
 }

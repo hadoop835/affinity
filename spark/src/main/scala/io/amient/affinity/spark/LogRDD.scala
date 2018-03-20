@@ -1,5 +1,7 @@
 package io.amient.affinity.spark
 
+import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
+import com.sun.xml.internal.messaging.saaj.util.ByteInputStream
 import io.amient.affinity.core.serde.AbstractSerde
 import io.amient.affinity.core.storage.{ByteKey, LogEntry, LogStorage, Record}
 import io.amient.affinity.core.util.{EventTime, TimeRange}
@@ -7,9 +9,11 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.util.LongAccumulator
 import org.apache.spark.util.collection.ExternalAppendOnlyMap
 import org.apache.spark.{Partition, SparkContext, TaskContext}
+import org.xml.sax.InputSource
 
 import scala.collection.JavaConverters._
 import scala.reflect.ClassTag
+import scala.xml.{Elem, XML}
 
 class LogRDD[POS <: Comparable[POS]] private(@transient private val sc: SparkContext,
                                              storageBinder: => LogStorage[POS], range: TimeRange, compacted: Boolean)
@@ -46,14 +50,19 @@ class LogRDD[POS <: Comparable[POS]] private(@transient private val sc: SparkCon
     storage.reset(split.index, range)
     context.addTaskCompletionListener(_ => storage.close)
     val compactor = (r1: LogEntry[POS], r2: LogEntry[POS]) => if (r1.timestamp > r2.timestamp) r1 else r2
-    val logRecords = storage.boundedIterator().asScala.map(record => (new ByteKey(record.key), record))
+    val logRecords = storage.boundedIterator().asScala.map { record =>
+      if (record.key != null) (new ByteKey(record.key), record) else {
+        if (!compacted) (null, record) else {
+          throw new IllegalArgumentException("null key encountered on a compacted stream")
+        }
+      }
+    }
     if (!compacted) logRecords else {
       val spillMap = new ExternalAppendOnlyMap[ByteKey, LogEntry[POS], LogEntry[POS]]((v) => v, compactor, compactor)
       spillMap.insertAll(logRecords)
       spillMap.iterator.filter { case (_, entry) => !storage.isTombstone(entry) }
     }
   }
-
 
   /**
     * Create a 2-dimensional RDD which projects event-time and processing-time of the given stream log
@@ -71,6 +80,7 @@ class LogRDD[POS <: Comparable[POS]] private(@transient private val sc: SparkCon
 
   /**
     * transform the bianry LogRDD into RDD[(K,V)] using the give serdes
+    *
     * @param serdeBinder serde used for both keys and values
     * @tparam K Key type
     * @tparam V Value type
@@ -82,7 +92,7 @@ class LogRDD[POS <: Comparable[POS]] private(@transient private val sc: SparkCon
   /**
     * transform the bianry LogRDD into RDD[(K,V)] using the give serdes
     *
-    * @param keySerdeBinder serde for Key types
+    * @param keySerdeBinder   serde for Key types
     * @param valueSerdeBinder serde for this LogRDD value type
     * @tparam K Key type of both rdds
     * @tparam V Value type of this rdd
@@ -101,6 +111,31 @@ class LogRDD[POS <: Comparable[POS]] private(@transient private val sc: SparkCon
     }
   }
 
+  /**
+    * Map this LogRDD from bytes to json objects
+    *
+    * @return rdd of json objects
+    */
+  def json(): RDD[JsonNode] = mapPartitions { partition =>
+    val mapper = new ObjectMapper
+    partition.map {
+      case (_, entry) => mapper.readValue(entry.value, classOf[JsonNode])
+    }
+  }
+
+  /**
+    * Map this LogRDD from bytes to xml Elem objects
+    *
+    * @return rdd of xml Elem objects
+    */
+  def xml(): RDD[Elem] = map {
+    case (_, entry) => XML.load(new String(entry.value))
+  }
+
+
+  /**
+    * Serialization-optimized join. See overload method for more details.
+    */
   def join[K: ClassTag, V: ClassTag, X](serdeBinder: => AbstractSerde[Any], other: RDD[(K, X)]): RDD[(K, (V, X))] = {
     join[K, V, X](serdeBinder, serdeBinder, other)
   }
@@ -148,7 +183,7 @@ object LogRDD {
     * Map an RDD to the underlying binary log stream
     *
     * @param storageBinder binding for the log storage
-    * @param sc spark context
+    * @param sc            spark context
     * @tparam POS type of the log position
     * @return LogRDD
     */
@@ -160,10 +195,10 @@ object LogRDD {
   /**
     * append a set key-value pairs to the log storage
     *
-    * @param serdeBinder serde used for both keys and values
+    * @param serdeBinder   serde used for both keys and values
     * @param storageBinder binding for the log storage
-    * @param data rdd containing the key-value pairs to be appended
-    * @param sc spark context
+    * @param data          rdd containing the key-value pairs to be appended
+    * @param sc            spark context
     * @tparam K key type
     * @tparam V value type
     */
@@ -176,11 +211,11 @@ object LogRDD {
   /**
     * append a set key-value pairs to the log storage
     *
-    * @param keySerdeBinder serde used for keys
+    * @param keySerdeBinder   serde used for keys
     * @param valueSerdeBinder serde used for values
-    * @param storageBinder binding for the log storage
-    * @param data rdd containing the key-value pairs to be appended
-    * @param sc spark context
+    * @param storageBinder    binding for the log storage
+    * @param data             rdd containing the key-value pairs to be appended
+    * @param sc               spark context
     * @tparam K key type
     * @tparam V value type
     */

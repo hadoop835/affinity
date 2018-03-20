@@ -20,6 +20,8 @@
 package io.amient.affinity.core.http
 
 import akka.http.javadsl.model.ContentTypes
+import akka.http.scaladsl.Http
+import akka.http.scaladsl.model.{HttpMethods, HttpRequest, HttpResponse}
 import akka.http.scaladsl.model.HttpMethods._
 import akka.http.scaladsl.model.StatusCodes._
 import akka.stream.ActorMaterializer
@@ -28,7 +30,7 @@ import io.amient.affinity.core.ack
 import io.amient.affinity.core.actor.{GatewayHttp, Partition}
 import io.amient.affinity.core.cluster.Node
 import io.amient.affinity.core.http.RequestMatchers._
-import io.amient.affinity.core.util.{Scatter, AffinityTestBase}
+import io.amient.affinity.core.util.{AffinityTestBase, Scatter}
 import org.codehaus.jackson.map.ObjectMapper
 import org.scalatest.{BeforeAndAfterAll, FlatSpec, Matchers}
 
@@ -54,16 +56,27 @@ class PingPongSystemTest extends FlatSpec with AffinityTestBase with BeforeAndAf
 
     val ks = keyspace("region")
 
+    object ERROR {
+      def unapply(http: HttpExchange): Option[HttpExchange] = {
+        throw new IllegalArgumentException("Simulated resumable exception")
+      }
+    }
+
     override def handle: Receive = {
       case HTTP(GET, PATH("ping"), _, response) => response.success(Encoder.json(OK, "pong", gzip = false))
       case http@HTTP(GET, PATH("timeout"), _, response) if http.timeout(200 millis) =>
-      case HTTP(GET, PATH("clusterping"), _, response) =>
+      case HTTP(GET, PATH("clusterping"), _, response) => handleWith(response) {
         implicit val timeout = Timeout(1 second)
-        delegateAndHandleErrors(response, ks gather ClusterPing()) {
+        ks gather ClusterPing() map {
           case pong => Encoder.json(OK, pong, gzip = false)
         }
+      }
       case HTTP_POST(ContentTypes.APPLICATION_JSON, entity, PATH("ping"), _, response) =>
         response.success(Encoder.json(OK, Decoder.json(entity), gzip = true))
+
+      case HTTP(GET, PATH("restartable"), _, _) => throw new Exception("Simulated restartable exception")
+
+      case ERROR(HTTP(GET, PATH("resumable"), _, response)) => response.success(HttpResponse(OK))
     }
   })
 
@@ -110,4 +123,12 @@ class PingPongSystemTest extends FlatSpec with AffinityTestBase with BeforeAndAf
     Encoder.json(json) should be("{\"hello\":\"hello\"}")
     node1.get_json(node1.http_post_json("/ping", json)) should be(json)
   }
+
+  "Gateway" should "not restart after illegal argument exception from a handler" in {
+    node1.http(HttpRequest(HttpMethods.GET, node1.uri("/resumable")))
+    implicit val system = node1.system
+    Http().shutdownAllConnectionPools()
+    node1.http_get("/ping").status should be (OK)
+  }
+  
 }
