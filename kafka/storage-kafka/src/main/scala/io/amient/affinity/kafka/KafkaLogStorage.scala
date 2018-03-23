@@ -235,15 +235,13 @@ class KafkaLogStorage(conf: LogStorageConf) extends LogStorage[java.lang.Long] w
     producer.flush()
   }
 
-  override def close(): Unit = {
-    try kafkaConsumer.close() finally try if (producerActive) producer.close() finally {
-      closed = true
-    }
+  override def close(): Unit = if (!closed) {
+    try kafkaConsumer.close() finally try if (producerActive) producer.close() finally closed = true
   }
 
   override def isTombstone(entry: LogEntry[lang.Long]) = entry.value == null
 
-  override def ensureCorrectConfiguration(ttlMs: Long, numPartitions: Int, readonly: Boolean) {
+  override def ensureCorrectConfiguration(ttlMs: Long, numPartitions: Int, readonly: Boolean): Unit = {
     val adminProps = new Properties() {
       put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaStorageConf.BootstrapServers())
       //the following is here to pass the correct security settings - maybe only security.* and sasl.* settings could be filtered
@@ -256,7 +254,7 @@ class KafkaLogStorage(conf: LogStorageConf) extends LogStorage[java.lang.Long] w
     }
     val admin = AdminClient.create(adminProps)
     try {
-      val adminTimeoutMs = 15000
+      val adminTimeoutMs: Long = 15000
       val compactionPolicy = (if (ttlMs > 0) "compact,delete" else "compact")
       val replicationFactor = kafkaStorageConf.ReplicationFactor().toShort
       val topicConfigs = Map(

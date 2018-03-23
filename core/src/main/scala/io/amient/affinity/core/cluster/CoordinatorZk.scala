@@ -54,8 +54,6 @@ class CoordinatorZk(system: ActorSystem, group: String, config: Config) extends 
 
   private val zk = ZkClients.get(zkConf)
 
-  private var currentState = Map[String, String]()
-
   if (!zk.exists(zkRoot)) zk.createPersistent(groupRoot, true)
 
   val initialChildren = zk.subscribeChildChanges(groupRoot, new IZkChildListener() {
@@ -80,11 +78,11 @@ class CoordinatorZk(system: ActorSystem, group: String, config: Config) extends 
 
   private def listAsIndexedSeq(list: util.List[String]) = list.asScala.toIndexedSeq
 
-  private def updateChildren(children: util.List[String]) = {
+  private def updateChildren(children: util.List[String]): Unit = {
     if (children != null) {
       val newHandles = listAsIndexedSeq(children).map(id => s"$groupRoot/$id")
-      val newState = newHandles.map(handle => (handle, zk.readData(handle).asInstanceOf[String]))
-      updateGroup(newState.toMap)
+      val newState = newHandles.map(handle => (handle, zk.readData[String](handle))).toMap
+      updateGroup(newState)
     }
   }
 

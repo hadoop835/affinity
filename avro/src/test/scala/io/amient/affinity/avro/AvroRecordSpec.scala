@@ -29,8 +29,6 @@ import scala.collection.immutable.Seq
 
 class AvroRecordSpec extends FlatSpec with Matchers {
 
-  private val log = LoggerFactory.getLogger(classOf[AvroRecordSpec])
-
   val recordV2Schema = new Schema.Parser().parse("{\"type\":\"record\",\"name\":\"Record_V1\",\"namespace\":\"io.amient.affinity.avro\",\"fields\":[{\"name\":\"items\",\"type\":{\"type\":\"array\",\"items\":{\"type\":\"record\",\"name\":\"SimpleRecord\",\"fields\":[{\"name\":\"id\",\"type\":{\"type\":\"record\",\"name\":\"SimpleKey\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]},\"default\":{\"id\":0}},{\"name\":\"side\",\"type\":{\"type\":\"enum\",\"name\":\"SimpleEnum\",\"symbols\":[\"A\",\"B\",\"C\"]},\"default\":\"A\"},{\"name\":\"seq\",\"type\":{\"type\":\"array\",\"items\":\"SimpleKey\"},\"default\":[]}]}},\"default\":[]},{\"name\":\"index\",\"type\":{\"type\":\"map\",\"values\":\"SimpleRecord\"},\"default\":{}},{\"name\":\"setOfPrimitives\",\"type\":{\"type\":\"array\",\"items\":\"long\"},\"default\":[]}]}")
 
   val oldSerde = new MemorySchemaRegistry {
@@ -74,7 +72,7 @@ class AvroRecordSpec extends FlatSpec with Matchers {
   }
 
   "Array[Byte]" should "be treated as Avro Bytes underlied by nio.ByteBuffer" in {
-    def compare(x: AvroBytes, y: AvroBytes) {
+    def compare(x: AvroBytes, y: AvroBytes): Unit = {
       ByteUtils.equals(x.raw, y.raw) should be(true)
       ByteUtils.equals(x.optional.get, y.optional.get) should be(true)
       x.listed.zip(y.listed).foreach { case (a, b) => ByteUtils.equals(a, b) should be(true) }

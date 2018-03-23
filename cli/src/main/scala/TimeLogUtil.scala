@@ -26,13 +26,13 @@ object TimeLogUtil {
   private val blocks = ListBuffer[(TimeRange, Long, Long)]()
 
   def apply(args: List[String]): Unit = args match {
-    case bootstrap :: topic :: partition :: fuzz :: from :: until :: fromOffset :: toOffset :: Nil => apply(bootstrap, topic, partition.toInt, fuzz.toInt, new TimeRange(from, until), fromOffset.toLong -> toOffset.toLong)
-    case bootstrap :: topic :: partition :: fuzz :: from :: until :: fromOffset :: Nil => apply(bootstrap, topic, partition.toInt, fuzz.toInt, new TimeRange(from, until), fromOffset.toLong -> Long.MaxValue)
-    case bootstrap :: topic :: partition :: fuzz :: from :: until :: Nil if (from.contains("T")) => apply(bootstrap, topic, partition.toInt, fuzz.toInt, new TimeRange(from, until))
-    case bootstrap :: topic :: partition :: fuzz :: from :: Nil if (from.contains("T")) => apply(bootstrap, topic, partition.toInt, fuzz.toInt, TimeRange.since(from))
-    case bootstrap :: topic :: partition :: fuzz :: from :: until :: Nil => apply(bootstrap, topic, partition.toInt, fuzz.toInt, TimeRange.UNBOUNDED, from.toLong -> until.toLong)
-    case bootstrap :: topic :: partition :: fuzz :: from :: Nil => apply(bootstrap, topic, partition.toInt, fuzz.toInt, TimeRange.UNBOUNDED, from.toLong -> Long.MaxValue)
-    case bootstrap :: topic :: partition :: fuzz :: Nil => apply(bootstrap, topic, partition.toInt, fuzz.toInt)
+    case bootstrap :: topic :: partition :: fuzz :: from :: until :: fromOffset :: toOffset :: Nil => apply(bootstrap, topic, partition.toInt, fuzz.toLong, new TimeRange(from, until), fromOffset.toLong -> toOffset.toLong)
+    case bootstrap :: topic :: partition :: fuzz :: from :: until :: fromOffset :: Nil => apply(bootstrap, topic, partition.toInt, fuzz.toLong, new TimeRange(from, until), fromOffset.toLong -> Long.MaxValue)
+    case bootstrap :: topic :: partition :: fuzz :: from :: until :: Nil if (from.contains("T")) => apply(bootstrap, topic, partition.toInt, fuzz.toLong, new TimeRange(from, until))
+    case bootstrap :: topic :: partition :: fuzz :: from :: Nil if (from.contains("T")) => apply(bootstrap, topic, partition.toInt, fuzz.toLong, TimeRange.since(from))
+    case bootstrap :: topic :: partition :: fuzz :: from :: until :: Nil => apply(bootstrap, topic, partition.toInt, fuzz.toLong, TimeRange.UNBOUNDED, from.toLong -> until.toLong)
+    case bootstrap :: topic :: partition :: fuzz :: from :: Nil => apply(bootstrap, topic, partition.toInt, fuzz.toLong, TimeRange.UNBOUNDED, from.toLong -> Long.MaxValue)
+    case bootstrap :: topic :: partition :: fuzz :: Nil => apply(bootstrap, topic, partition.toInt, fuzz.toLong)
     case bootstrap :: topic :: partition :: Nil => apply(bootstrap, topic, partition.toInt)
     case bootstrap :: topic :: Nil => apply(bootstrap, topic)
     case _ => printHelp()
@@ -46,7 +46,12 @@ object TimeLogUtil {
     println("Available partitions: 0 - " + (getKafkaLog(bootstrap, topic).getNumPartitions-1))
   }
 
-  def apply(bootstrap: String, topic: String, partition: Int, fuzzMinutes: Long = 5, range: TimeRange = TimeRange.UNBOUNDED, offsetRange: (Long, Long) = (Long.MinValue, Long.MaxValue)) {
+  def apply(bootstrap: String,
+            topic: String,
+            partition: Int,
+            fuzzMinutes: Long = 5,
+            range: TimeRange = TimeRange.UNBOUNDED,
+            offsetRange: (Long, Long) = (Long.MinValue, Long.MaxValue)): Unit = {
     val log = getKafkaLog(bootstrap, topic)
     logger.info(s"calculating compaction stats for range: $range..\n")
     log.reset(partition, range)
@@ -114,7 +119,7 @@ object TimeLogUtil {
     EventTime.local(unix).toString.replace("Z", "").replace("T", " ")
   }
 
-  private def plot(blocks: List[(TimeRange, Long, Long)]) {
+  private def plot(blocks: List[(TimeRange, Long, Long)]): Unit = {
     val render: IRender = new Render
     val builder: IContextBuilder = render.newBuilder
     builder.width(width).height(height)

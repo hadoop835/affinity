@@ -37,6 +37,7 @@ import org.slf4j.LoggerFactory
 import scala.collection.JavaConversions._
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
+import scala.language.postfixOps
 
 object UUID {
   def apply(uuid: java.util.UUID): UUID = apply(ByteUtils.uuid(uuid))
@@ -133,7 +134,7 @@ class KafkaStorageSpec extends FlatSpec with AffinityTestBase with EmbeddedKafka
     runTestWithState(state, topic, 10)
   }
 
-  private def runTestWithState(state: State[Int, TestRecord], topic: String, numRecords: Int) {
+  private def runTestWithState(state: State[Int, TestRecord], topic: String, numRecords: Int): Unit = {
     val numWrites = new AtomicInteger(numRecords)
     val numToWrite = numWrites.get
     val l = System.currentTimeMillis()
