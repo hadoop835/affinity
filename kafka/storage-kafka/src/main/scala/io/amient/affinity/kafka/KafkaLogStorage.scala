@@ -239,7 +239,7 @@ class KafkaLogStorage(conf: LogStorageConf) extends LogStorage[java.lang.Long] w
 
   override def isTombstone(entry: LogEntry[lang.Long]) = entry.value == null
 
-  override def ensureCorrectConfiguration(ttlMs: Long, numPartitions: Int, readonly: Boolean) {
+  override def ensureCorrectConfiguration(ttlMs: Long, numPartitions: Int, readonly: Boolean): Unit = {
     log.warn(s"Using Kafka version < 0.11 - cannot auto-configure topics")
   }
 
