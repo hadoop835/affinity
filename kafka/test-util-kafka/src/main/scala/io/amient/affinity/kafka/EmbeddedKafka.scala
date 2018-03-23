@@ -31,6 +31,8 @@ import org.apache.kafka.common.protocol.SecurityProtocol
 import org.scalatest.{BeforeAndAfterAll, Suite}
 import org.slf4j.LoggerFactory
 
+import scala.language.postfixOps
+
 trait EmbeddedKafka extends EmbeddedZooKeeper with BeforeAndAfterAll {
 
   self: Suite =>
