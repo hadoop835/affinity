@@ -233,10 +233,8 @@ class KafkaLogStorage(conf: LogStorageConf) extends LogStorage[java.lang.Long] w
     producer.flush()
   }
 
-  override def close(): Unit = {
-    try kafkaConsumer.close() finally try if (producerActive) producer.close() finally {
-      closed = true
-    }
+  override def close(): Unit = if (!closed) {
+    try kafkaConsumer.close() finally try if (producerActive) producer.close() finally closed = true
   }
 
   override def isTombstone(entry: LogEntry[lang.Long]) = entry.value == null
