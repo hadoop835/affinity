@@ -11,7 +11,7 @@ buildscript {
 }
 
 group = 'io.amient.affinity'
-version = '0.6.5-SNAPSHOT'
+version = '0.7.0-SNAPSHOT'
 
 ext {
     encoding = "UTF-8"
@@ -20,9 +20,9 @@ ext {
     junitVersion = '4.12'
     typesafeConfigVersion = '1.3.0'
     //
-    scalaVersion = '2.11.8'
-    scalaTestVersion = '2.2.6'
-    scalaCheckVersion = '1.12.5'
+    scalaVersion = '2.12.5'
+    scalaTestVersion = '3.0.0'
+    scalaCheckVersion = '1.12.6'
     slf4jVersion = '1.7.21'
     akkaVersion = '2.4.20'
     akkaHttpVersion = '10.0.10'
