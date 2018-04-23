@@ -36,6 +36,7 @@ import org.apache.spark.{SparkConf, SparkContext}
 import org.scalatest.{BeforeAndAfterAll, FlatSpec, Matchers}
 
 import scala.collection.JavaConversions._
+import scala.language.existentials
 import scala.reflect.ClassTag
 
 case class CompactionTestEvent(key: Int, data: String, ts: Long) extends AvroRecord with EventTime with Routed {
@@ -63,7 +64,7 @@ object LogRDDSpecUniverse {
 
   def avroCompactRdd[K: ClassTag, V: ClassTag](avroConf: AvroConf, storageConf: LogStorageConf, range: TimeRange = TimeRange.UNBOUNDED)
                                               (implicit sc: SparkContext): RDD[(K, V)] = {
-    LogRDD(LogStorage.newInstance(storageConf), range).compact.present[K,V](AvroSerde.create(avroConf))
+      LogRDD(LogStorage.newInstance(storageConf), range).compact.present[K,V](AvroSerde.create(avroConf))
   }
 
 }

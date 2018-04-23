@@ -19,11 +19,12 @@
 
 package io.amient.affinity.avro
 
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream, ObjectOutputStream}
+
 import io.amient.affinity.avro.record.{AvroRecord, AvroSerde}
 import io.amient.affinity.core.util.ByteUtils
 import org.apache.avro.{Schema, SchemaValidationException}
 import org.scalatest.{FlatSpec, Matchers}
-import org.slf4j.LoggerFactory
 
 import scala.collection.immutable.Seq
 
@@ -202,6 +203,27 @@ class AvroRecordSpec extends FlatSpec with Matchers {
     assert(ByteUtils.startsWith(bytes, prefix))
     newSerde.fromBytes(bytes) should be(key)
 
+  }
+
+  "AvroRecord" should "be serializable by java serializer" in {
+    val record = SimpleRecord()
+    AvroRecord.write(record, record.schema)  //trigger initialization of lazy vals
+    val bos = new ByteArrayOutputStream()
+    val bytes = try {
+      val out = new ObjectOutputStream(bos)
+      out.writeObject(record)
+      out.flush()
+      bos.toByteArray()
+    } finally {
+      bos.close()
+    }
+    val bis = new ByteArrayInputStream(bytes)
+    val in = new ObjectInputStream(bis)
+    try {
+      in.readObject() should be (record)
+    } finally {
+      in.close()
+    }
   }
 
 }

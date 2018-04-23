@@ -19,7 +19,7 @@
 
 package io.amient.affinity.avro
 
-import java.nio.file.Files
+import java.nio.file.{Files, Path}
 
 import com.typesafe.config.Config
 import io.amient.affinity.avro.LocalSchemaRegistry.LocalAvroConf
@@ -37,6 +37,7 @@ object LocalSchemaRegistry {
   object LocalAvroConf extends LocalAvroConf {
     override def apply(config: Config) = new LocalAvroConf().apply(config)
   }
+
   class LocalAvroConf extends CfgStruct[LocalAvroConf](classOf[AvroConf]) {
     val DataPath = filepath("schema.registry.path", true)
   }
@@ -44,12 +45,14 @@ object LocalSchemaRegistry {
 }
 
 
-class LocalSchemaRegistry(config: Config) extends AvroSerde with AvroSchemaRegistry {
+class LocalSchemaRegistry(dataPath: Path) extends AvroSerde with AvroSchemaRegistry {
 
-  val conf = new LocalAvroConf().apply(config)
-  val dataPath = conf.DataPath()
+  def this(config: Config) = this(LocalAvroConf(config).DataPath())
 
-  if (!Files.exists(dataPath)) Files.createDirectories(dataPath)
+  def checkDataPath(): Unit = {
+    require(dataPath != null)
+    if (!Files.exists(dataPath)) Files.createDirectories(dataPath)
+  }
 
   override def close() = ()
 
@@ -58,6 +61,7 @@ class LocalSchemaRegistry(config: Config) extends AvroSerde with AvroSchemaRegis
     * @return schema
     */
   override protected def loadSchema(id: Int): Schema = {
+    checkDataPath()
     new Schema.Parser().parse(dataPath.resolve(s"$id.avsc").toFile)
   }
 
@@ -68,6 +72,7 @@ class LocalSchemaRegistry(config: Config) extends AvroSerde with AvroSchemaRegis
     * @return
     */
   override protected def registerSchema(subject: String, schema: Schema): Int = hypersynchronized {
+    checkDataPath()
     val s = dataPath.resolve(s"$subject.dat")
     val versions: Map[Schema, Int] = if (Files.exists(s)) {
       Source.fromFile(s.toFile).mkString.split(",").toList.map(_.toInt).map {
@@ -82,11 +87,15 @@ class LocalSchemaRegistry(config: Config) extends AvroSerde with AvroSchemaRegis
       val schemaPath = dataPath.resolve(s"$id.avsc")
       Files.createFile(schemaPath)
       Files.write(schemaPath, schema.toString(true).getBytes("UTF-8"))
+      val updatedVersions = versions + (schema -> id)
+      Files.write(s, updatedVersions.values.mkString(",").getBytes("UTF-8"))
       id
     }
   }
 
   private def hypersynchronized[X](func: => X) = synchronized {
+
+    checkDataPath()
     val file = dataPath.resolve(".lock").toFile
 
     def getLock(countDown: Int = 30): Unit = {

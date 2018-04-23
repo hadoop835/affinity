@@ -23,6 +23,7 @@ import io.amient.affinity.core.serde.AbstractSerde
 import io.amient.affinity.core.storage.{LogStorage, LogStorageConf, Record}
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.language.existentials
 
 class OutputDataStream[K, V](keySerde: AbstractSerde[_ >: K], valSerde: AbstractSerde[_ >: V], conf: LogStorageConf) {
 
@@ -31,6 +32,11 @@ class OutputDataStream[K, V](keySerde: AbstractSerde[_ >: K], valSerde: Abstract
   def append(record: Record[K, V]): Future[_ <: Comparable[_]] = {
     val binaryRecord = new Record(keySerde.toBytes(record.key), valSerde.toBytes(record.value), record.timestamp)
     val jf = storage.append(binaryRecord)
+    Future(jf.get)(ExecutionContext.Implicits.global)
+  }
+
+  def delete(key: K): Future[_ <: Comparable[_]] = {
+    val jf = storage.delete(keySerde.toBytes(key))
     Future(jf.get)(ExecutionContext.Implicits.global)
   }
 

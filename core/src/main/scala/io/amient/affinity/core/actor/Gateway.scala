@@ -27,21 +27,19 @@ import akka.pattern.ask
 import akka.routing._
 import akka.util.Timeout
 import io.amient.affinity.Conf
-import io.amient.affinity.core.ack
 import io.amient.affinity.core.actor.Controller.{CreateGateway, GracefulShutdown}
 import io.amient.affinity.core.actor.Keyspace.{CheckKeyspaceStatus, KeyspaceStatus}
-import io.amient.affinity.core.actor.Partition.{CreateKeyValueMediator, KeyValueMediatorCreated}
 import io.amient.affinity.core.cluster.Coordinator
 import io.amient.affinity.core.cluster.Coordinator.MasterUpdates
-import io.amient.affinity.core.config.{Cfg, CfgStruct}
-import io.amient.affinity.core.storage.State
-import scala.language.postfixOps
+import io.amient.affinity.core.config.CfgStruct
+import io.amient.affinity.core.storage.{LogStorageConf, State}
+
 import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.language.{implicitConversions, postfixOps}
 import scala.reflect.ClassTag
 import scala.util.control.NonFatal
-import scala.language.implicitConversions
 
 object Gateway {
 
@@ -49,12 +47,10 @@ object Gateway {
     val Class = cls("class", classOf[Gateway], false)
     val SuspendQueueMaxSize = integer("suspend.queue.max.size", 1000)
     val Http = struct("http", new GatewayHttp.HttpConf)
-    val Streams = group("stream", classOf[InputStreamConf], false)
+    val Stream = group("stream", classOf[LogStorageConf], false)
   }
 
   final case class GatewayClusterStatus(suspended: Boolean)
-
-  class InputStreamConf extends CfgStruct[InputStreamConf](Cfg.Options.IGNORE_UNKNOWN)
 
 }
 
@@ -65,8 +61,6 @@ trait Gateway extends ActorHandler {
   import Gateway._
 
   private val conf = Conf(context.system.settings.config).Affi
-
-//  private implicit val scheduler = context.system.scheduler
 
   implicit def javaToScalaFuture[T](jf: java.util.concurrent.Future[T]): Future[T] = Future(jf.get)(ExecutionContext.Implicits.global)
 
@@ -152,7 +146,7 @@ trait Gateway extends ActorHandler {
     // finally - set up a watch for each referenced keyspace coordinator
     // coordinator will be sending 2 types of messages for each individual keyspace reference:
     // 1. MasterUpdates(..) sent whenever a master actor is added or removed to/from the routing tables
-    // 1. KeyspaceStatus(..)
+    // 2. KeyspaceStatus(..)
     keyspaces.values.foreach {
       case (coordinator, _, _) => coordinator.watch(self, clusterWide = true)
     }
@@ -180,7 +174,7 @@ trait Gateway extends ActorHandler {
 
   abstract override def manage = super.manage orElse {
 
-    case request@GracefulShutdown() => sender.reply(request) {
+    case request@GracefulShutdown() => request(sender) ! {
       shutdown()
       log.info("Gateway shutdown completed")
       context.stop(self)
@@ -193,7 +187,7 @@ trait Gateway extends ActorHandler {
           s"to instantiate a non-http gateway ${this.getClass}. This may lead to uncertainity in the Controller.")
       }
 
-    case msg@MasterUpdates(group, add, remove) => sender.reply(msg) {
+    case request@MasterUpdates(group, add, remove) => request(sender) ! {
       val service: ActorRef = keyspaces(group)._2
       remove.foreach(ref => service ! RemoveRoutee(ActorRefRoutee(ref)))
       add.foreach(ref => service ! AddRoutee(ActorRefRoutee(ref)))

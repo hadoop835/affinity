@@ -25,31 +25,23 @@ import java.util.{Observable, Observer}
 import akka.actor.{Actor, ActorRef, Status}
 import akka.event.Logging
 import io.amient.affinity.Conf
-import io.amient.affinity.core.ack
 import io.amient.affinity.core.actor.Container.{PartitionOffline, PartitionOnline}
-import io.amient.affinity.core.actor.Partition.RegisterMediatorSubscriber
 import io.amient.affinity.core.storage.State
 import io.amient.affinity.core.util.Reply
 
 import scala.collection.JavaConverters._
-import scala.language.postfixOps
 import scala.reflect.ClassTag
 import scala.util.control.NonFatal
 
-object Partition {
-  //FIXME #122 make special serializer for mediation messages - currently this is java and the footprint is huge
-  case class CreateKeyValueMediator(stateStore: String, key: Any) extends Routed
-  case class KeyValueMediatorCreated(mediator: ActorRef)
-  case class RegisterMediatorSubscriber(subscriber: ActorRef)
+//FIXME #122 make special serializer for mediation messages - currently this is java and the footprint is huge
+case class CreateKeyValueMediator(stateStore: String, key: Any) extends Routed
+case class KeyValueMediatorCreated(mediator: ActorRef)
+case class RegisterMediatorSubscriber(subscriber: ActorRef)
 
-  case class BecomeStandby() extends Reply[Unit]
-
-  case class BecomeMaster() extends Reply[Unit]
-}
+case class BecomeStandby() extends Reply[Unit]
+case class BecomeMaster() extends Reply[Unit]
 
 trait Partition extends ActorHandler {
-
-  import Partition._
 
   private val log = Logging.getLogger(context.system, this)
 
@@ -83,7 +75,7 @@ trait Partition extends ActorHandler {
     started = true
     log.debug(s"Starting keyspace: $keyspace, partition: $partition")
     //active state will block until all state stores have caught-up
-    activeState()
+    become(standby = false)
     //only after states have caught up we make the partition online and available to cooridnators
     context.parent ! PartitionOnline(self)
     super.preStart()
@@ -113,14 +105,14 @@ trait Partition extends ActorHandler {
   abstract override def manage: Receive = super.manage orElse {
 
     case msg@BecomeMaster() =>
-      sender.reply(msg) {} //acking the receipt of the instruction immediately
-      activeState() //then blocking the inbox until state stores have caught-up with storage
+      msg(sender) ! {} //acking the receipt of the instruction immediately
+      become(standby = false) //then blocking the inbox until state stores have caught-up with storage
       log.debug(s"Became master for partition $keyspace/$partition")
       onBecomeMaster //then invoke custom handler
 
     case msg@BecomeStandby() =>
-      sender.reply(msg) {} //acking the receipt of the instruction immediately
-      passiveState()  //then switch state stores to passive mode, i.e. tailing the storage in the background
+      msg(sender) ! {} //acking the receipt of the instruction immediately
+      become(standby = true)  //then switch state stores to standby mode, i.e. tailing the storage in the background
       log.debug(s"Became standby for partition $keyspace/$partition")
       onBecomeStandby
 
@@ -138,15 +130,11 @@ trait Partition extends ActorHandler {
     stateStores(stateStoreName)
   }
 
-  private[core] def activeState(): Unit = {
+  private[core] def become(standby: Boolean): Unit = {
     stateStores.values.foreach { state =>
       state.boot
-      if (state.external) state.tail
+      if (state.external || standby) state.tail
     }
-  }
-
-  private[core] def passiveState(): Unit = {
-    stateStores.values.foreach(_.tail)
   }
 
   private[core] def closeStateStores(): Unit = stateStores.foreach {

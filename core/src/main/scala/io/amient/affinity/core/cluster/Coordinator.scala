@@ -29,9 +29,9 @@ import com.typesafe.config.Config
 import io.amient.affinity.Conf
 import io.amient.affinity.core.ack
 import io.amient.affinity.core.config.CfgStruct
-import io.amient.affinity.core.util.Reply
+import io.amient.affinity.core.util.{ByteUtils, Reply}
 
-import scala.collection.JavaConversions._
+import scala.collection.JavaConverters._
 import scala.collection.Set
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
@@ -48,7 +48,7 @@ object Coordinator {
   class CoorinatorConf extends CfgStruct[CoorinatorConf] {
     val Class = cls("class", classOf[Coordinator], classOf[CoordinatorZk])
 
-    override protected def specializations(): util.Set[String] = Set("zookeeper", "embedded")
+    override protected def specializations(): util.Set[String] = Set("zookeeper", "embedded").asJava
   }
 
   final case class MasterUpdates(_keyspace: String, add: Set[ActorRef], remove: Set[ActorRef]) extends Reply[Unit] {
@@ -121,7 +121,8 @@ abstract class Coordinator(val system: ActorSystem, val group: String) {
       val currentMasters = getCurrentMasters.filter(clusterWide || _.path.address.hasLocalScope)
       val update = MasterUpdates(group, currentMasters, Set())
       implicit val timeout = Timeout(30 seconds)
-      watcher ack (if (clusterWide) update else update.localTo(watcher)) onFailure {
+      val informed = watcher ack (if (clusterWide) update else update.localTo(watcher))
+      informed.failed.foreach {
         case e: Throwable => if (!closed.get) {
           logger.error(e, "Could not send initial master status to watcher. This is could lead to inconsistent view of the cluster, terminating the system.")
           system.terminate()
@@ -186,9 +187,12 @@ abstract class Coordinator(val system: ActorSystem, val group: String) {
 
   }
 
+  //this is the method that is deterministic across all nodes. it resolves which one of the
+  //replicas is the master for each partition applying a murmur2 hash on the actor handle
+  //selecting the actor with the smallest hash
   private def getCurrentMasters: Set[ActorRef] = {
     handles.map(_._2.path.toStringWithoutAddress).toSet[String].map { relPath =>
-      handles.filter(_._2.path.toStringWithoutAddress == relPath).minBy(_._1)._2
+      handles.filter(_._2.path.toStringWithoutAddress == relPath).minBy(x => ByteUtils.murmur2(x._1.getBytes))._2
     }
   }
 
@@ -197,7 +201,8 @@ abstract class Coordinator(val system: ActorSystem, val group: String) {
     if (!closed.get) watchers.foreach { case (watcher, global) =>
       implicit val timeout = Timeout(30 seconds)
       try {
-        watcher ack (if (global) fullUpdate else fullUpdate.localTo(watcher)) onFailure {
+        val informed = watcher ack (if (global) fullUpdate else fullUpdate.localTo(watcher))
+        informed.failed.foreach {
           case e: Throwable => if (!closed.get) {
             logger.warning(s"Could not notify watcher: $watcher(global = $global) due to " + e.getCause)
           }

@@ -23,17 +23,18 @@ import java.io.Closeable
 import java.util.concurrent.{Executors, TimeUnit}
 
 import akka.event.Logging
+import io.amient.affinity.Conf
 import io.amient.affinity.core.serde.{AbstractSerde, Serde}
 import io.amient.affinity.core.storage.{LogStorage, LogStorageConf, Record}
 import io.amient.affinity.core.util.{CompletedJavaFuture, EventTime, OutputDataStream, TimeRange}
 
-import scala.collection.JavaConversions._
+import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.collection.parallel.immutable.ParSeq
 import scala.concurrent.duration._
 import scala.concurrent.{Await, Future}
-import scala.language.postfixOps
+import scala.language.{existentials, postfixOps}
 import scala.reflect.ClassTag
 
 trait GatewayStream extends Gateway {
@@ -43,7 +44,7 @@ trait GatewayStream extends Gateway {
 
   private val lock = new Object
 
-  private val log = Logging.getLogger(context.system, this)
+  private val logger = Logging.getLogger(context.system, this)
 
   private val config = context.system.settings.config
 
@@ -56,12 +57,17 @@ trait GatewayStream extends Gateway {
   lazy val outpuStreams: ParSeq[OutputDataStream[_, _]] = declardOutputStreams.result().par
 
   def output[K: ClassTag, V: ClassTag](streamIdentifier: String): OutputDataStream[K, V] = {
-    val streamConfig = LogStorage.StorageConf(config.getConfig(s"affinity.node.gateway.stream.$streamIdentifier"))
-    val keySerde: AbstractSerde[K] = Serde.of[K](config)
-    val valSerde: AbstractSerde[V] = Serde.of[V](config)
-    val outpuDataStream = new OutputDataStream(keySerde, valSerde, streamConfig)
-    declardOutputStreams += outpuDataStream
-    outpuDataStream
+    val streamConf = Conf(config).Affi.Node.Gateway.Stream(streamIdentifier)
+    if (!streamConf.Class.isDefined) {
+      logger.warning(s"Output stream is not enabled in the current configuration: $streamIdentifier")
+      null
+    } else {
+      val keySerde: AbstractSerde[K] = Serde.of[K](config)
+      val valSerde: AbstractSerde[V] = Serde.of[V](config)
+      val outpuDataStream = new OutputDataStream(keySerde, valSerde, streamConf)
+      declardOutputStreams += outpuDataStream
+      outpuDataStream
+    }
   }
 
   /**
@@ -73,10 +79,14 @@ trait GatewayStream extends Gateway {
     * @tparam V
     */
   def input[K: ClassTag, V: ClassTag](streamIdentifier: String)(processor: InputStreamProcessor[K, V]): Unit = {
-    val streamConfig = LogStorage.StorageConf(config.getConfig(s"affinity.node.gateway.stream.$streamIdentifier"))
-    val keySerde: AbstractSerde[K] = Serde.of[K](config)
-    val valSerde: AbstractSerde[V] = Serde.of[V](config)
-    declaredInputStreamProcessors += new RunnableInputStream[K, V](streamIdentifier, keySerde, valSerde, streamConfig, processor)
+    val streamConf = Conf(config).Affi.Node.Gateway.Stream(streamIdentifier)
+    if (!streamConf.Class.isDefined) {
+      logger.warning(s"Input stream is not enabled in the current configuration: $streamIdentifier")
+    } else {
+      val keySerde: AbstractSerde[K] = Serde.of[K](config)
+      val valSerde: AbstractSerde[V] = Serde.of[V](config)
+      declaredInputStreamProcessors += new RunnableInputStream[K, V](streamIdentifier, keySerde, valSerde, streamConf, processor)
+    }
   }
 
   val inputStreamManager = new Thread {
@@ -137,8 +147,8 @@ trait GatewayStream extends Gateway {
     val consumer = LogStorage.newInstance(streamConfig)
     //this type of buffering has quite a high memory footprint but doesn't require a data structure with concurrent access
     val work = new ListBuffer[Future[Any]]
-    //TODO make hardcoded commit interval configurable
-    val commitInterval = 10 seconds
+    val commitInterval: Long = streamConfig.CommitIntervalMs()
+    val commitTimeout: Long = streamConfig.CommitTimeoutMs()
 
     override def close(): Unit = consumer.cancel()
 
@@ -147,21 +157,21 @@ trait GatewayStream extends Gateway {
       var lastCommit: java.util.concurrent.Future[java.lang.Long] = new CompletedJavaFuture(0L)
 
       try {
-        consumer.reset(TimeRange.since(minTimestamp))
-        log.info(s"Initializing input stream processor: $identifier, starting from: ${EventTime.local(minTimestamp)}, details: ${streamConfig}")
+        consumer.resume(TimeRange.since(minTimestamp))
+        logger.info(s"Initializing input stream processor: $identifier, starting from: ${EventTime.local(minTimestamp)}, details: ${streamConfig}")
         var lastCommitTimestamp = System.currentTimeMillis()
         var finalized = false
         while ((!closed && !finalized) || !lastCommit.isDone) {
           //clusterSuspended is volatile so we check it for each message set, in theory this should not matter because whatever the processor() does
           //should be suspended anyway and hang so no need to do it for every record
           if (clusterSuspended) {
-            log.info(s"Pausing input stream processor: $identifier")
+            logger.info(s"Pausing input stream processor: $identifier")
             lock.synchronized(lock.wait())
             if (closed) return
-            log.info(s"Resuming input stream processor: $identifier")
+            logger.info(s"Resuming input stream processor: $identifier")
           }
           val entries = consumer.fetch(true)
-          if (entries != null) for (entry <- entries) {
+          if (entries != null) for (entry <- entries.asScala) {
             //TODO we need entry.partition and use it with entry.position to provide watermark and gather it for distribution during the commit
             val key: K = keySerde.fromBytes(entry.key)
             val value: V = valSerde.fromBytes(entry.value)
@@ -172,11 +182,11 @@ trait GatewayStream extends Gateway {
            *  Every <commitInterval> all outputs and work is flushed and then consumer is commited()
            */
           val now = System.currentTimeMillis()
-          if ((closed && !finalized) || now - lastCommitTimestamp > commitInterval.toMillis) {
+          if ((closed && !finalized) || now - lastCommitTimestamp > commitInterval) {
             //flush all outputs in parallel - these are all outputs declared in this gateway
             outpuStreams.foreach(_.flush())
             //flush all pending work accumulated in this processor only
-            Await.result(Future.sequence(work.result), commitInterval)
+            Await.result(Future.sequence(work.result), commitTimeout millis)
             //commit the records processed by this processor only since the last commit
             lastCommit = consumer.commit() //trigger new commit
             //TODO here the underlying commit future would distribute on completion the partial watermark to registered accumulator actors
@@ -189,9 +199,9 @@ trait GatewayStream extends Gateway {
 
       } catch {
         case _: InterruptedException =>
-        case e: Throwable => log.error(e, s"Input stream processor: $identifier")
+        case e: Throwable => logger.error(e, s"Input stream processor: $identifier")
       } finally {
-        log.info(s"Finished input stream processor: $identifier (closed = $closed)")
+        logger.info(s"Finished input stream processor: $identifier (closed = $closed)")
         consumer.close()
         keySerde.close()
         valSerde.close()

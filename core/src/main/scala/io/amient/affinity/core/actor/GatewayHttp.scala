@@ -44,7 +44,6 @@ import io.amient.affinity.Conf
 import io.amient.affinity.avro.record.{AvroRecord, AvroSerde}
 import io.amient.affinity.core.ack
 import io.amient.affinity.core.actor.Controller.{CreateGateway, GracefulShutdown}
-import io.amient.affinity.core.actor.Partition.RegisterMediatorSubscriber
 import io.amient.affinity.core.config.{Cfg, CfgStruct}
 import io.amient.affinity.core.http.RequestMatchers.{HTTP, PATH}
 import io.amient.affinity.core.http._
@@ -52,7 +51,7 @@ import io.amient.affinity.core.util.ByteUtils
 
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future, Promise}
-import scala.language.postfixOps
+import scala.language.{implicitConversions, postfixOps}
 import scala.util.control.NonFatal
 
 object GatewayHttp {
@@ -93,8 +92,6 @@ trait GatewayHttp extends Gateway {
   private val suspendedHttpRequestQueue = scala.collection.mutable.ListBuffer[HttpExchange]()
 
   import context.{dispatcher, system}
-
-//  private implicit val scheduler = context.system.scheduler
 
   private var isSuspended = true
 
@@ -156,7 +153,7 @@ trait GatewayHttp extends Gateway {
   }
 
   abstract override def manage: Receive = super.manage orElse {
-    case msg@CreateGateway => context.parent ! Controller.GatewayCreated(listener.getPort)
+    case CreateGateway => context.parent ! Controller.GatewayCreated(listener.getPort)
 
     case exchange: HttpExchange if (isSuspended) =>
       log.warning("Handling suspended, enqueuing request: " + exchange.request)
@@ -166,9 +163,8 @@ trait GatewayHttp extends Gateway {
         new RuntimeException("Suspension queue overflow")
       }
 
-    case request@GracefulShutdown() => sender.reply(request) {
-      context.stop(self)
-    }
+    case request@GracefulShutdown() => request(sender) ! context.stop(self)
+
   }
 
   override def unhandled: Receive = {
@@ -194,12 +190,28 @@ trait GatewayHttp extends Gateway {
     case e: Throwable => response.success(handleException(headers)(e))
   }
 
-  def handleAsText(response: Promise[HttpResponse], dataGenerator: => Any, headers: List[HttpHeader] = List()): Unit = {
-    handleAs(response, dataGenerator, headers)(data => Encoder.text(OK, data))
+  def handleAsText(response: Promise[HttpResponse], dataGenerator: => Any): Unit = {
+    handleAsText(response, dataGenerator, gzip = true, headers = List())
   }
 
-  def handleAsJson(response: Promise[HttpResponse], dataGenerator: => Any, headers: List[HttpHeader] = List()): Unit = {
-    handleAs(response, dataGenerator, headers)(data => Encoder.json(OK, data))
+  def handleAsText(response: Promise[HttpResponse], dataGenerator: => Any, headers: List[HttpHeader]): Unit = {
+    handleAsText(response, dataGenerator, gzip = true, headers)
+  }
+
+  def handleAsText(response: Promise[HttpResponse], dataGenerator: => Any, gzip: Boolean, headers: List[HttpHeader]): Unit = {
+    handleAs(response, dataGenerator, headers)(data => Encoder.text(OK, data, gzip))
+  }
+
+  def handleAsJson(response: Promise[HttpResponse], dataGenerator: => Any): Unit = {
+    handleAsJson(response, dataGenerator, gzip = true, headers = List())
+  }
+
+  def handleAsJson(response: Promise[HttpResponse], dataGenerator: => Any, headers: List[HttpHeader]): Unit = {
+    handleAsJson(response, dataGenerator, gzip = true, headers)
+  }
+
+  def handleAsJson(response: Promise[HttpResponse], dataGenerator: => Any, gzip: Boolean, headers: List[HttpHeader]): Unit = {
+    handleAs(response, dataGenerator, headers)(data => Encoder.json(OK, data, gzip))
   }
 
   def handleAs(response: Promise[HttpResponse], dataGenerator: => Any, headers: List[HttpHeader] = List())(f: (Any) => HttpResponse): Unit = try {
@@ -227,16 +239,25 @@ trait GatewayHttp extends Gateway {
   }
 
 
-  def handleWith(promise: Promise[HttpResponse])(f: => Future[HttpResponse])(implicit ctx: ExecutionContext): Unit = {
-    promise.completeWith(f recover handleException)
+  def handleWith(promise: Promise[HttpResponse], headers: List[HttpHeader] = List())(f: => Future[HttpResponse])(implicit ctx: ExecutionContext): Unit = {
+    promise.completeWith(try {
+      f recover handleException(headers)
+    } catch {
+      case t: Throwable => Future.successful(handleException(headers)(t))
+    })
   }
 
 
   def handleException: PartialFunction[Throwable, HttpResponse] = handleException(List())
 
   def handleException(headers: List[HttpHeader]): PartialFunction[Throwable, HttpResponse] = {
-    case e@RequestException(status) => errorResponse(e, StatusCodes.custom(status.intValue().toString.take(3).toInt, status.reason, status.defaultMessage), headers)
-    case e: ExecutionException => handleException(e.getCause)
+    case RequestException(status, serverMessage) =>
+      log.error(s"${status.intValue} ${status.reason} - $serverMessage")
+      val validHttpStatusCode = status.intValue().toString.take(3).toInt
+      val validHttpStatus = StatusCode.int2StatusCode(validHttpStatusCode)
+      val message = status.intValue.toString + " " + status.reason
+      HttpResponse(validHttpStatus, entity = message, headers = headers)
+    case e: ExecutionException => handleException(headers)(e.getCause)
     case e: NoSuchElementException => errorResponse(e, NotFound, headers)
     case e: IllegalArgumentException => errorResponse(e, BadRequest, headers)
     case e: IllegalStateException => errorResponse(e, Conflict, headers)
@@ -272,14 +293,12 @@ trait WebSocketSupport extends GatewayHttp {
       None
   }
 
-//  private val serializers = SerializationExtension(context.system).serializerByIdentity
-
   private val avroSerde = AvroSerde.create(config)
 
   private implicit val materializer: ActorMaterializer = ActorMaterializer.create(context.system)
 
   abstract override def handle: Receive = super.handle orElse {
-    case http@HTTP(GET, PATH("affinity.js"), _, response) if afjs.isDefined => response.success(Encoder.text(OK, afjs.get))
+    case HTTP(GET, PATH("affinity.js"), _, response) if afjs.isDefined => response.success(Encoder.text(OK, afjs.get, gzip = true))
   }
 
   /**
@@ -484,7 +503,7 @@ trait WebSocketSupport extends GatewayHttp {
           case NonFatal(e) =>
             var logged = false
             val errorHandler: PartialFunction[Throwable, Unit] = receiveHandleError(upstream) orElse {
-              case RequestException(status: StatusCode) => upstream ! Map("type" -> "error", "code" -> status.intValue, "message" -> status.defaultMessage)
+              case RequestException(status, _) => upstream ! Map("type" -> "error", "code" -> status.intValue, "message" -> status.reason)
               case e: ExecutionException => receiveHandleError(upstream)(e.getCause)
               case e: NoSuchElementException => upstream ! Map("type" -> "error", "code" -> 404, "message" -> e.getMessage())
               case e: IllegalArgumentException => upstream ! Map("type" -> "error", "code" -> 400, "message" -> e.getMessage())

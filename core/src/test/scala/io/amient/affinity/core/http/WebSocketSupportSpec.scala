@@ -30,11 +30,9 @@ import akka.http.scaladsl.model.ws.{Message, TextMessage}
 import akka.pattern.ask
 import akka.util.Timeout
 import io.amient.affinity.avro.record.AvroRecord
-import io.amient.affinity.core.IntegrationTestBase
+import io.amient.affinity.core.{IntegrationTestBase, ack}
 import io.amient.affinity.core.actor.Controller.{CreateContainer, CreateGateway, GracefulShutdown}
-import io.amient.affinity.core.actor.Partition.RegisterMediatorSubscriber
-import io.amient.affinity.core.ack
-import io.amient.affinity.core.actor._
+import io.amient.affinity.core.actor.{RegisterMediatorSubscriber, _}
 import io.amient.affinity.core.http.RequestMatchers._
 import io.amient.affinity.ws.WebSocketClient
 import io.amient.affinity.ws.WebSocketClient.{AvroMessageHandler, JsonMessageHandler, TextMessageHandler}
@@ -59,7 +57,7 @@ class WebSocketSupportSpec extends IntegrationTestBase with Matchers {
     val data = state[Int, Envelope]("test")
 
     override def handle: Receive = {
-      case query@Envelope(id, side, seq) => sender.replyWith(query)(data.replace(id.id, query))
+      case query@Envelope(id, _, _) => query(sender) ! data.replace(id.id, query)
       case ID(s) => data.push(s, ID(s+1))
     }
   }))
@@ -110,7 +108,7 @@ class WebSocketSupportSpec extends IntegrationTestBase with Matchers {
           }, new UpstreamActor {
             override def handle: Receive = {
               case None => push("{}")
-              case Some(base@Envelope(id, side, _)) => push(Encoder.json(base))
+              case Some(base: Envelope) => push(Encoder.json(base))
               case id:ID => push(Encoder.json(id))
             }
           })
@@ -148,7 +146,7 @@ class WebSocketSupportSpec extends IntegrationTestBase with Matchers {
           ws.close()
         }
       } catch {
-        case e: IOException => true
+        case _: IOException => true
       }) should be(true)
     }
 
