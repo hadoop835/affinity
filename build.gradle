@@ -10,9 +10,6 @@ buildscript {
     }
 }
 
-group = 'io.amient.affinity'
-version = '0.7.0-SNAPSHOT'
-
 ext {
     encoding = "UTF-8"
 
