@@ -28,10 +28,9 @@ import akka.util.Timeout
 import io.amient.affinity.core.http.RequestException
 import org.slf4j.LoggerFactory
 
-import scala.concurrent.duration.{Duration, _}
+import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.language.{implicitConversions, postfixOps}
-import scala.reflect.{ClassTag, classTag}
 import scala.runtime.BoxedUnit
 import scala.util.control.NonFatal
 import scala.util.{Failure, Success}
@@ -61,7 +60,7 @@ trait AckSupport {
 
 trait Reply[+T] {
 
-  def apply[TT >: T](sender: ActorRef): ReplyTo[TT] = new ReplyTo[TT](sender)
+  def apply[S >: T](sender: ActorRef): ReplyTo[S] = new ReplyTo[S](sender)
 
 }
 
@@ -72,7 +71,7 @@ class ReplyTo[T](sender: ActorRef) {
     })
   }
 
-  def !(response: => Future[T])(implicit context: ExecutionContext) = {
+  def !(response: => Future[T])(implicit context: ExecutionContext): Future[T] = {
     (try response catch {
       case NonFatal(e) => Future.failed(e)
     }) pipeTo sender
@@ -89,19 +88,57 @@ final class AckableActorRef(val target: ActorRef) extends AnyRef {
 
   private val log = LoggerFactory.getLogger(this.getClass)
 
+
+  /**
+    * Scatter Gather
+    *
+    * @param scatter
+    * @param timeout
+    * @param scheduler
+    * @param context
+    * @tparam T
+    * @return gathered and aggregated result T
+    */
+  def ???[T](scatter: Scatter[T])(implicit timeout: Timeout, scheduler: Scheduler, context: ExecutionContext): Future[T] = {
+    gather(scatter)
+  }
+
   /**
     *
     * @param scatter
     * @param timeout
     * @param scheduler
     * @param context
-    * @param tag
     * @tparam T
     * @return gathered and aggregated result T
     */
-  def gather[T](scatter: Scatter[T])(implicit timeout: Timeout, scheduler: Scheduler, context: ExecutionContext, tag: ClassTag[T]): Future[T] = {
-    ack(ScatterGather(scatter, timeout)).map(_.reduce(scatter.gather))
+  def gather[T](scatter: Scatter[T])(implicit timeout: Timeout, scheduler: Scheduler, context: ExecutionContext): Future[T] = {
+    ??(ScatterGather(scatter, timeout)).map(_.reduce(scatter.gather))
   }
+
+
+  /**
+    * Typed Ask
+    * @param message message ask to send this actor target
+    * @param timeout after which the response is considered failed
+    * @param context
+    * @tparam T response type
+    * @return
+    */
+  def ??[T](message: Reply[T])(implicit timeout: Timeout, context: ExecutionContext): Future[T] = {
+    target ? message map (result => (if (result.isInstanceOf[BoxedUnit]) () else result).asInstanceOf[T])
+  }
+
+  /**
+    * Ack - Type Ask with Retries
+    *
+    * @param message
+    * @param timeout
+    * @param scheduler
+    * @param context
+    * @return Future response of type T
+    */
+  def ?![T](message: Reply[T])(implicit timeout: Timeout, scheduler: Scheduler, context: ExecutionContext): Future[T] = ack(message)
 
   /**
     * initiator ack() which is used where the guaranteed processin of the message is required
@@ -113,15 +150,14 @@ final class AckableActorRef(val target: ActorRef) extends AnyRef {
     * @param context
     * @return
     */
-  def ack[T](message: Reply[T])(implicit timeout: Timeout, scheduler: Scheduler, context: ExecutionContext, tag: ClassTag[T]): Future[T] = {
+
+  def ack[T](message: Reply[T])(implicit timeout: Timeout, scheduler: Scheduler, context: ExecutionContext): Future[T] = {
     val promise = Promise[T]()
 
-    def attempt(retry: Int, delay: Duration = 0 seconds): Unit = {
-      val f = if (delay.toMillis == 0) target ? message else after(timeout.duration, scheduler)(target ? message)
+    def attempt(retry: Int, delay: FiniteDuration = 0 seconds): Unit = {
+      val f = if (delay.toMillis == 0) target ? message else after(delay, scheduler)(target ? message)
       f map {
-        case result: T => promise.success(result)
-        case _: BoxedUnit if (tag == classTag[Unit]) => promise.success(().asInstanceOf[T])
-        case i => promise.failure(new RuntimeException(s"expecting $tag, got: ${i.getClass} for $message sent to $target"))
+        result => promise.success((if (result.isInstanceOf[BoxedUnit]) () else result).asInstanceOf[T])
       } recover {
         case cause: AkkaException => promise.failure(cause)
         case cause: RequestException => promise.failure(cause)

@@ -30,7 +30,7 @@ import io.amient.affinity.core.util.{EventTime, JavaPromise, MappedJavaFuture, T
 import io.amient.affinity.kafka.KafkaStorage.KafkaStorageConf
 import org.apache.kafka.clients.admin.{AdminClient, AdminClientConfig, ConfigEntry, NewTopic}
 import org.apache.kafka.clients.consumer.{ConsumerRebalanceListener, KafkaConsumer, OffsetAndMetadata, OffsetCommitCallback}
-import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord, RecordMetadata}
+import org.apache.kafka.clients.producer.{Callback, KafkaProducer, ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.errors.{TopicExistsException, WakeupException}
@@ -56,22 +56,22 @@ object KafkaStorage {
   }
 
   class KafkaStorageConf extends CfgStruct[KafkaStorageConf](classOf[LogStorageConf]) {
-    val Topic = string("kafka.topic", true)
-    val ReplicationFactor = integer("kafka.replication.factor", 1)
-    val BootstrapServers = string("kafka.bootstrap.servers", true)
-    val Producer = struct("kafka.producer", new KafkaProducerConf)
-    val Consumer = struct("kafka.consumer", new KafkaConsumerConf)
+    val Topic = string("kafka.topic", true).doc("kafka topic name")
+    val ReplicationFactor = integer("kafka.replication.factor", 1).doc("replication factor of the kafka topic")
+    val BootstrapServers = string("kafka.bootstrap.servers", true).doc("kafka connection string used for consumer and/or producer")
+    val Producer = struct("kafka.producer", new KafkaProducerConf).doc("any settings that the underlying version of kafka producer client supports")
+    val Consumer = struct("kafka.consumer", new KafkaConsumerConf).doc("any settings that the underlying version of kafka consumer client supports")
   }
 
   class KafkaProducerConf extends CfgStruct[KafkaProducerConf](Cfg.Options.IGNORE_UNKNOWN)
 
   class KafkaConsumerConf extends CfgStruct[KafkaConsumerConf](Cfg.Options.IGNORE_UNKNOWN) {
-    val GroupId = string("group.id", false)
+    val GroupId = string("group.id", false).doc("kafka consumer group.id will be used if it backs an input stream, state stores manage partitions internally")
   }
 
 }
 
-class KafkaLogStorage(conf: LogStorageConf) extends LogStorage[java.lang.Long] with ConsumerRebalanceListener {
+class KafkaLogStorage(conf: LogStorageConf) extends LogStorage[java.lang.Long] with ConsumerRebalanceListener with Callback {
 
   private val log = LoggerFactory.getLogger(classOf[KafkaLogStorage])
 
@@ -82,11 +82,17 @@ class KafkaLogStorage(conf: LogStorageConf) extends LogStorage[java.lang.Long] w
   val valueSubject: String = s"${topic}-value"
 
   private val producerConfig = new Properties() {
+    put("retries", Int.MaxValue.toString)
+    put("max.in.flight.requests.per.connection", "1")
+    put("max.block.ms", Long.MaxValue.toString)
     if (kafkaStorageConf.Producer.isDefined) {
       val producerConfig = kafkaStorageConf.Producer.config()
       if (producerConfig.hasPath("bootstrap.servers")) throw new IllegalArgumentException("bootstrap.servers cannot be overriden for KafkaStroage producer")
       if (producerConfig.hasPath("key.serializer")) throw new IllegalArgumentException("Binary kafka stream cannot use custom key.serializer")
       if (producerConfig.hasPath("value.serializer")) throw new IllegalArgumentException("Binary kafka stream cannot use custom value.serializer")
+      if (producerConfig.hasPath("max.in.flight.requests.per.connection")) log.warn("Changing producer max.in.flight.requests.per.connection from recommended: 1")
+      if (producerConfig.hasPath("max.block.ms")) log.warn("Changing producer max.block.ms from recommended: Long.MaxValue")
+      if (producerConfig.hasPath("retries")) log.warn("Changing producer retries from recommended: Int.MaxValue")
       producerConfig.entrySet.asScala.foreach { case (entry) =>
         put(entry.getKey, entry.getValue.unwrapped())
       }
@@ -218,6 +224,7 @@ class KafkaLogStorage(conf: LogStorageConf) extends LogStorage[java.lang.Long] w
   }
 
   private var producerActive = false
+  @volatile private var produceException: Throwable = null
 
   lazy protected val producer = new KafkaProducer[Array[Byte], Array[Byte]](producerConfig)
 
@@ -228,8 +235,11 @@ class KafkaLogStorage(conf: LogStorageConf) extends LogStorage[java.lang.Long] w
     } else {
       new ProducerRecord(topic, null, record.timestamp, record.key, record.value)
     }
-    new MappedJavaFuture[RecordMetadata, java.lang.Long](producer.send(producerRecord)) {
-      override def map(result: RecordMetadata): java.lang.Long = result.offset()
+    //setting the callback because that is the only way how to ensure flush throws exception on error
+    new MappedJavaFuture[RecordMetadata, java.lang.Long](producer.send(producerRecord, this)) {
+      override def map(result: RecordMetadata): java.lang.Long = {
+        result.offset()
+      }
     }
   }
 
@@ -238,7 +248,15 @@ class KafkaLogStorage(conf: LogStorageConf) extends LogStorage[java.lang.Long] w
     append(new Record[Array[Byte], Array[Byte]](key, null, EventTime.unix));
   }
 
+  override def onCompletion(metadata: RecordMetadata, exception: Exception) = {
+    if (exception != null) {
+      produceException = exception
+    }
+  }
+
   override def flush() = if (producerActive) {
+    //kafka producer flush doesn't throw exception so we need to use our own exception var set by producer.send callback
+    if (produceException != null) throw produceException
     producer.flush()
   }
 

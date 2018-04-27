@@ -43,8 +43,12 @@ object Keyspace {
 
   class KeyspaceConf extends CfgStruct[KeyspaceConf] {
     val PartitionClass = cls("class", classOf[Partition], true)
+      .doc("Implementation of core.actor.Partition of whose instances is the Keyspace composed")
+
     val NumPartitions = integer("num.partitions", true)
-    val State = group("state", classOf[StateConf], false)
+      .doc("Total number of partitions in the Keyspace")
+
+    val State = group("state", classOf[StateConf], false).doc("Keyspace may have any number of States, each identified by its ID - each state within a Keyspace is co-partitioned identically")
   }
 
   final case class CheckKeyspaceStatus(_keyspace: String) extends Reply[KeyspaceStatus]
@@ -85,7 +89,7 @@ class Keyspace(config: Config) extends Actor {
       val recipients = routes.values
       implicit val timeout = t
       implicit val scheduler = context.system.scheduler
-      Future.sequence(recipients.map(x => x.ref ack message))
+      Future.sequence(recipients.map(x => x.ref ?! message))
     }
 
     /**

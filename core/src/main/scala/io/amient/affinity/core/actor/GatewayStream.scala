@@ -48,6 +48,8 @@ trait GatewayStream extends Gateway {
 
   private val config = context.system.settings.config
 
+  private val nodeConf = Conf(config).Affi.Node
+
   type InputStreamProcessor[K, V] = Record[K, V] => Future[Any]
 
   private val declaredInputStreamProcessors = new mutable.ListBuffer[RunnableInputStream[_, _]]
@@ -57,7 +59,7 @@ trait GatewayStream extends Gateway {
   lazy val outpuStreams: ParSeq[OutputDataStream[_, _]] = declardOutputStreams.result().par
 
   def output[K: ClassTag, V: ClassTag](streamIdentifier: String): OutputDataStream[K, V] = {
-    val streamConf = Conf(config).Affi.Node.Gateway.Stream(streamIdentifier)
+    val streamConf = nodeConf.Gateway.Stream(streamIdentifier)
     if (!streamConf.Class.isDefined) {
       logger.warning(s"Output stream is not enabled in the current configuration: $streamIdentifier")
       null
@@ -79,7 +81,7 @@ trait GatewayStream extends Gateway {
     * @tparam V
     */
   def input[K: ClassTag, V: ClassTag](streamIdentifier: String)(processor: InputStreamProcessor[K, V]): Unit = {
-    val streamConf = Conf(config).Affi.Node.Gateway.Stream(streamIdentifier)
+    val streamConf = nodeConf.Gateway.Stream(streamIdentifier)
     if (!streamConf.Class.isDefined) {
       logger.warning(s"Input stream is not enabled in the current configuration: $streamIdentifier")
     } else {
@@ -101,7 +103,7 @@ trait GatewayStream extends Gateway {
         }
         inputStreamExecutor.shutdown()
         inputStreamProcessors.foreach(_.close)
-        inputStreamExecutor.awaitTermination(10, TimeUnit.SECONDS) //TODO use shutdown timeout
+        inputStreamExecutor.awaitTermination(nodeConf.ShutdownTimeoutMs(), TimeUnit.MILLISECONDS)
       } finally {
         inputStreamExecutor.shutdownNow()
       }
@@ -166,13 +168,14 @@ trait GatewayStream extends Gateway {
           //should be suspended anyway and hang so no need to do it for every record
           if (clusterSuspended) {
             logger.info(s"Pausing input stream processor: $identifier")
-            lock.synchronized(lock.wait())
-            if (closed) return
+            while (clusterSuspended) {
+              lock.synchronized(lock.wait())
+              if (closed) return
+            }
             logger.info(s"Resuming input stream processor: $identifier")
           }
           val entries = consumer.fetch(true)
           if (entries != null) for (entry <- entries.asScala) {
-            //TODO we need entry.partition and use it with entry.position to provide watermark and gather it for distribution during the commit
             val key: K = keySerde.fromBytes(entry.key)
             val value: V = valSerde.fromBytes(entry.value)
             val unitOfWork = processor(new Record(key, value, entry.timestamp))
@@ -189,7 +192,6 @@ trait GatewayStream extends Gateway {
             Await.result(Future.sequence(work.result), commitTimeout millis)
             //commit the records processed by this processor only since the last commit
             lastCommit = consumer.commit() //trigger new commit
-            //TODO here the underlying commit future would distribute on completion the partial watermark to registered accumulator actors
             //clear the work accumulator for the next commit
             work.clear
             lastCommitTimestamp = now

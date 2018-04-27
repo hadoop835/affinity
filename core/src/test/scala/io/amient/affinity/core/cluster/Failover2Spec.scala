@@ -57,7 +57,7 @@ class Failover2Spec extends FlatSpec with AffinityTestBase with EmbeddedKafka wi
   val node1 = new Node(config)
   node1.startGateway(new GatewayHttp {
 
-    import context.dispatcher
+    implicit val executor = scala.concurrent.ExecutionContext.Implicits.global
 
     implicit val scheduler = context.system.scheduler
 
@@ -66,14 +66,14 @@ class Failover2Spec extends FlatSpec with AffinityTestBase with EmbeddedKafka wi
     override def handle: Receive = {
       case HTTP(GET, PATH(key), _, response) => handleWith(response) {
         implicit val timeout = Timeout(specTimeout / 5)
-        keyspace1 ack GetValue(key) map {
+        keyspace1 ?! GetValue(key) map {
           case valueOption => Encoder.json(OK, valueOption, gzip = false)
         }
       }
 
       case HTTP(POST, PATH(key, value), _, response) => handleWith(response) {
         implicit val timeout = Timeout(specTimeout / 5)
-        keyspace1 ack PutValue(key, value) map {
+        keyspace1 ?! PutValue(key, value) map {
           _ => HttpResponse(SeeOther, headers = List(headers.Location(Uri(s"/$key"))))
         }
       }
@@ -98,8 +98,7 @@ class Failover2Spec extends FlatSpec with AffinityTestBase with EmbeddedKafka wi
     super.afterAll()
   }
 
-  //FIXME #177
-  "Master Transition" should "not lead to inconsistent state" ignore {
+  "Master Transition" should "not lead to inconsistent state" in {
     val requestCount = new AtomicInteger(0)
     val expected = new ConcurrentHashMap[String, String]()
     import scala.concurrent.ExecutionContext.Implicits.global
@@ -111,11 +110,11 @@ class Failover2Spec extends FlatSpec with AffinityTestBase with EmbeddedKafka wi
       val value = random.nextInt.toString
       requests += node1.http(POST, s"/$key/$value") map {
         case response =>
-          if (i == 100) {
+          expected.put(key, value)
+          if (i == 25) {
             //after a few writes have succeeded kill one node
             node2.shutdown()
           }
-          expected.put(key, value)
           Success(response.status)
       } recover {
         case e: Throwable => Failure(e)
@@ -125,9 +124,9 @@ class Failover2Spec extends FlatSpec with AffinityTestBase with EmbeddedKafka wi
     Await.result(Future.sequence(requests), specTimeout).foreach(_ should be(Success(SeeOther)))
 
     expected.asScala.foreach { case (key, value) =>
-      val y = Await.result(node1.http(GET, s"/$key").map { response => response.entity }, specTimeout / 3)
-      val x = jsonStringEntity(value)
-      y should be(x)
+      val actualEntity = Await.result(node1.http(GET, s"/$key").map { response => response.entity }, specTimeout / 3)
+      val expectedEntity = jsonStringEntity(value)
+      actualEntity should be(expectedEntity)
     }
   }
 
